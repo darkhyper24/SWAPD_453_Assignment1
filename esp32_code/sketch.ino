@@ -20,6 +20,8 @@ const char *TOPIC_TEMP = "johmmmsensors/temperature";
 const char *TOPIC_HUM = "johmmmsensors/humidity";
 const char *TOPIC_LIGHT = "johmmmsensors/light";
 const char *TOPIC_MOTION = "johmmmsensors/motion";
+const char *TOPIC_STATUS = "johmmmsensors/status";
+const char *TOPIC_HEARTBEAT = "johmmmsensors/heartbeat";
 
 // -----------------------------
 // MQTT Client
@@ -48,7 +50,7 @@ float tempMax = 30.0;
 int lightMin = 500;
 float distMin = 10.0;
 
-unsigned long reportIntervalMs = 2000;
+unsigned long reportIntervalMs = 1000;
 
 int servoOpenAngle = 90;
 int servoClosedAngle = 0;
@@ -59,23 +61,20 @@ Servo servoMotor;
 // -----------------------------
 unsigned long lastSampleMs = 0;
 unsigned long buzzerOffAt = 0;
+unsigned long lastHeartbeatMs = 0;
 bool lastMotion = false;
 
 // -----------------------------
 // WiFi connection
 void connectWiFi()
 {
-
   Serial.print("Connecting to WiFi");
-
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
     Serial.print(".");
   }
-
   Serial.println("\nWiFi Connected");
   Serial.println(WiFi.localIP());
 }
@@ -84,9 +83,7 @@ void connectWiFi()
 // MQTT Callback
 void callback(char *topic, byte *payload, unsigned int length)
 {
-
   String message = "";
-
   for (int i = 0; i < length; i++)
   {
     message += (char)payload[i];
@@ -96,50 +93,38 @@ void callback(char *topic, byte *payload, unsigned int length)
 
   if (myTopic == "actuators/led/red")
   {
-
     digitalWrite(RED_LED, message == "ON");
     Serial.print("Red LED Status: ");
     Serial.println(message);
   }
-
   else if (myTopic == "actuators/led/yellow")
   {
-
     digitalWrite(YELLOW_LED, message == "ON");
     Serial.print("Yellow LED Status: ");
     Serial.println(message);
   }
-
   else if (myTopic == "actuators/led/green")
   {
-
     digitalWrite(GREEN_LED, message == "ON");
     Serial.print("Green LED Status: ");
     Serial.println(message);
   }
-
   else if (myTopic == "actuators/buzzer")
   {
-
     digitalWrite(BUZZER, message == "ON");
     Serial.print("Buzzer Status: ");
     Serial.println(message);
   }
-
   else if (myTopic == "actuators/relay")
   {
-
     digitalWrite(RELAY, message == "ON");
     Serial.print("Relay Status: ");
     Serial.println(message);
   }
-
   else if (myTopic == "actuators/servo")
   {
-
     int angle = message.toInt();
     servoMotor.write(angle);
-
     Serial.print("Servo Angle: ");
     Serial.println(angle);
   }
@@ -149,17 +134,12 @@ void callback(char *topic, byte *payload, unsigned int length)
 // MQTT reconnect
 void reconnectMQTT()
 {
-
   while (!mqttClient.connected())
   {
-
     Serial.print("Connecting to MQTT...");
-
     if (mqttClient.connect(MQTT_CLIENT_ID))
     {
-
       Serial.println("Connected");
-
       mqttClient.subscribe("actuators/led/red");
       mqttClient.subscribe("actuators/led/yellow");
       mqttClient.subscribe("actuators/led/green");
@@ -169,11 +149,9 @@ void reconnectMQTT()
     }
     else
     {
-
       Serial.print("Failed rc=");
       Serial.print(mqttClient.state());
       Serial.println(" retrying in 5 seconds");
-
       delay(5000);
     }
   }
@@ -182,22 +160,18 @@ void reconnectMQTT()
 // -----------------------------
 int readLdrAveraged()
 {
-
   long sum = 0;
-
   for (int i = 0; i < 8; i++)
   {
     sum += analogRead(LDR_PIN);
     delay(2);
   }
-
   return sum / 8;
 }
 
 // -----------------------------
 void setLedState(bool redOn, bool yellowOn, bool greenOn)
 {
-
   digitalWrite(RED_LED, redOn);
   digitalWrite(YELLOW_LED, yellowOn);
   digitalWrite(GREEN_LED, greenOn);
@@ -206,39 +180,29 @@ void setLedState(bool redOn, bool yellowOn, bool greenOn)
 // -----------------------------
 float readDistanceCm()
 {
-
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
-
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
-
   digitalWrite(TRIG_PIN, LOW);
-
   long duration = pulseIn(ECHO_PIN, HIGH, 30000);
-
   if (duration <= 0)
     return NAN;
-
   return duration * 0.0343 / 2;
 }
 
 // -----------------------------
 void setup()
 {
-
   Serial.begin(115200);
 
   pinMode(LDR_PIN, INPUT);
   pinMode(PIR_PIN, INPUT);
-
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
-
   pinMode(RED_LED, OUTPUT);
   pinMode(YELLOW_LED, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
-
   pinMode(BUZZER, OUTPUT);
   pinMode(RELAY, OUTPUT);
 
@@ -262,50 +226,51 @@ void setup()
 // -----------------------------
 void loop()
 {
-
   if (WiFi.status() != WL_CONNECTED)
     connectWiFi();
-
   if (!mqttClient.connected())
     reconnectMQTT();
 
   mqttClient.loop();
 
   unsigned long now = millis();
-
   if (now - lastSampleMs < reportIntervalMs)
     return;
-
   lastSampleMs = now;
 
+  // --- Read Sensors ---
   float temperature = dht.readTemperature();
   float humidity = dht.readHumidity();
-
   int lightRaw = readLdrAveraged();
   bool motion = digitalRead(PIR_PIN);
   float distance = readDistanceCm();
 
+  // --- Logic ---
   bool tempHigh = !isnan(temperature) && temperature > tempMax;
   bool dark = lightRaw < lightMin;
   bool nearObj = !isnan(distance) && distance < distMin;
 
   setLedState(tempHigh, dark, !tempHigh && !dark);
 
+  // --- Log LED States ---
+  Serial.printf("LEDs -> RED: %d | YELLOW: %d | GREEN: %d\n",
+                tempHigh ? 1 : 0,
+                dark ? 1 : 0,
+                (!tempHigh && !dark) ? 1 : 0);
+
   digitalWrite(RELAY, tempHigh);
 
   if (motion && !lastMotion)
   {
-
     digitalWrite(BUZZER, HIGH);
     delay(2000);
     digitalWrite(BUZZER, LOW);
   }
-
   lastMotion = motion;
 
   servoMotor.write(nearObj ? servoOpenAngle : servoClosedAngle);
 
-  // Publish sensor data
+  // --- Publish Sensor Data ---
   String tempJSON = "{\"temperature\": " + String(temperature) + "}";
   String humJSON = "{\"humidity\": " + String(humidity) + "}";
   String lightJSON = "{\"light\": " + String(lightRaw) + "}";
@@ -316,6 +281,25 @@ void loop()
   mqttClient.publish(TOPIC_LIGHT, lightJSON.c_str());
   mqttClient.publish(TOPIC_MOTION, motionJSON.c_str());
 
-  Serial.printf("T=%.2f H=%.2f L=%d M=%d D=%.2f\n",
-                temperature, humidity, lightRaw, motion, distance);
+  // --- Publish System Status ---
+  unsigned long uptimeSec = millis() / 1000;
+  String statusJSON = "{\"uptime\": " + String(uptimeSec) +
+                      ", \"rssi\": " + String(WiFi.RSSI()) +
+                      ", \"freeHeap\": " + String(ESP.getFreeHeap()) + "}";
+
+  mqttClient.publish(TOPIC_STATUS, statusJSON.c_str());
+
+  // --- Heartbeat every 10 seconds ---
+  if (now - lastHeartbeatMs >= 10000)
+  {
+    lastHeartbeatMs = now;
+    String hbJSON = "{\"status\": \"alive\", \"uptime\": " + String(millis() / 1000) + "}";
+    mqttClient.publish(TOPIC_HEARTBEAT, hbJSON.c_str());
+    Serial.println("Heartbeat sent");
+  }
+
+  // --- Serial Monitor Summary ---
+  Serial.printf("T=%.2f H=%.2f L=%d M=%d D=%.2f RSSI=%d Heap=%d\n",
+                temperature, humidity, lightRaw, motion, distance,
+                WiFi.RSSI(), ESP.getFreeHeap());
 }
